@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -155,7 +156,60 @@ func TestCleanup(t *testing.T) {
 				<-ctx.Done() // let the deadline pass
 			})
 
-			require.Equal(t, fmt.Sprintf("test exceeded timeout of %v", timeout), tb.error())
+			require.Equal(t, fmt.Sprintf("context deadline exceeded: test exceeded timeout of %v", timeout), tb.error())
+		})
+	})
+
+	t.Run("reports extension history", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			tb := newRecordingTB()
+			tb.run(func() {
+				ctx := For(tb)
+				ctx = EnsureRemaining(ctx, tb, DefaultTimeout()+10*time.Second)
+				<-ctx.Done()
+			})
+
+			require.Equal(t, strings.Join([]string{
+				"context deadline exceeded: test exceeded extended timeout of 1m40s (originally 1m30s)",
+				"ctx extensions   = 1 (+10s total)",
+				"  1. +10s after 0µs",
+			}, "\n"), tb.error())
+		})
+	})
+
+	t.Run("reports extension cap", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			tb := newRecordingTB()
+			tb.run(func() {
+				ctx := For(tb)
+				ctx = EnsureRemaining(ctx, tb, 10*time.Minute)
+				<-ctx.Done()
+			})
+
+			require.Equal(t, strings.Join([]string{
+				"context deadline exceeded: test exceeded test context extension cap of 2m0s (originally 1m30s, extensions requested total 8m30s)",
+				"ctx extensions   = 1 (+30s total; limited by test context extension cap)",
+				"  1. +30s after 0µs",
+			}, "\n"), tb.error())
+		})
+	})
+
+	t.Run("reports go test timeout", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			tb := newRecordingTB()
+			tb.deadline = time.Now().Add(5 * time.Second)
+			tb.run(func() {
+				ctx := For(tb, WithTimeout(10*time.Second))
+				<-ctx.Done()
+			})
+
+			require.Equal(t, "context deadline exceeded: test exceeded go test timeout before test context timeout of 10s", tb.error())
 		})
 	})
 }
@@ -446,15 +500,40 @@ func TestEnsureRemaining(t *testing.T) {
 	})
 }
 
+func TestExtensionAudit(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		ctx := For(t)
+		ctx = EnsureRemaining(ctx, t, DefaultTimeout()+10*time.Second)
+
+		timer := time.NewTimer(5 * time.Second)
+		<-timer.C
+
+		ctx = EnsureRemaining(ctx, t, DefaultTimeout()+20*time.Second)
+		ctx = EnsureRemaining(ctx, t, 10*time.Minute)
+		ctx = EnsureRemaining(ctx, t, 10*time.Minute)
+
+		require.Equal(t, strings.Join([]string{
+			"ctx extensions   = 3 (+30s total; limited by test context extension cap)",
+			"  1. +10s after 0µs",
+			"  2. +15s after 5s",
+			"  3. +5s after 5s",
+			"1 context extension denied",
+		}, "\n"), ExtensionAudit(ctx))
+	})
+}
+
 // recordingTB records failures instead of failing a real test.
 //
-// NOTE: it deliberately does not implement Deadline, so it stands in for a
-// testing.TB without a `go test -timeout` deadline.
+// By default it reports no Deadline, so it stands in for a testing.TB without
+// a `go test -timeout` deadline.
 type recordingTB struct {
 	testing.TB
 
 	ctx       context.Context
 	cancelCtx context.CancelFunc
+	deadline  time.Time
 
 	mu       sync.Mutex
 	cleanups []func()
@@ -477,6 +556,10 @@ func (r *recordingTB) Name() string {
 
 func (r *recordingTB) Context() context.Context {
 	return r.ctx
+}
+
+func (r *recordingTB) Deadline() (time.Time, bool) {
+	return r.deadline, !r.deadline.IsZero()
 }
 
 func (r *recordingTB) Cleanup(fn func()) {

@@ -2,6 +2,8 @@ package testcontext
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"slices"
 	"sync"
@@ -26,6 +28,9 @@ const (
 	maxTimeout          = 2 * time.Minute
 	testNameMetadataKey = "temporal-test-name"
 	testTimeoutEnvVar   = "TEMPORAL_TEST_TIMEOUT"
+
+	extensionLimitTestContextCap = "test context extension cap"
+	extensionLimitGoTestTimeout  = "go test timeout"
 )
 
 // contextStore tracks one context state per test.
@@ -62,6 +67,11 @@ type ownerKey struct{}
 // deadline, cancellation, or values), which is not safe to replace.
 type testContext struct {
 	context.Context
+}
+
+type extensionGrant struct {
+	duration time.Duration
+	elapsed  time.Duration
 }
 
 // GoTestDeadline returns the deadline imposed by `go test -timeout`, if any.
@@ -234,8 +244,26 @@ func EnsureRemaining(ctx context.Context, tb testing.TB, minRemaining time.Durat
 		return ctx
 	}
 
+	requestedDeadline := time.Now().Add(minRemaining)
+	requested := requestedDeadline.Sub(testDeadline)
+	if requested <= 0 {
+		if _, bare := ctx.(*testContext); bare {
+			return st.current
+		}
+		return ctx
+	}
+	st.extensionRequestedTotal += requested
+
 	// Cap the requested deadline at the context's ceiling.
-	requestedDeadline := util.MinTime(time.Now().Add(minRemaining), st.maxDeadline())
+	limit := ""
+	if maxDeadline := st.maxDeadline(); maxDeadline.Before(requestedDeadline) {
+		requestedDeadline = maxDeadline
+		limit = extensionLimitTestContextCap
+	}
+	if goTestDeadline, ok := GoTestDeadline(st.owner); ok && goTestDeadline.Before(requestedDeadline) {
+		requestedDeadline = goTestDeadline
+		limit = extensionLimitGoTestTimeout
+	}
 
 	// Only a context this package handed out can be swapped for the extended
 	// one without dropping state the caller derived onto it.
@@ -243,13 +271,38 @@ func EnsureRemaining(ctx context.Context, tb testing.TB, minRemaining time.Durat
 
 	// Extend the test context if the requested deadline is after the current deadline.
 	if requestedDeadline.After(testDeadline) {
+		st.extensionGrants = append(st.extensionGrants, extensionGrant{
+			duration: requestedDeadline.Sub(testDeadline),
+			elapsed:  time.Since(st.createdAt),
+		})
+		st.extensionLimit = limit
 		st.push(newTestContext(st.owner, st, requestedDeadline))
+	} else {
+		st.extensionDenied++
+		if limit != "" {
+			st.extensionLimit = limit
+		}
 	}
 
 	if bare {
 		return st.current
 	}
 	return ctx
+}
+
+// ExtensionAudit returns the extension history for the test context that owns ctx.
+func ExtensionAudit(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	st, _ := ctx.Value(ownerKey{}).(*contextState)
+	if st == nil {
+		return ""
+	}
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.extensionAuditLocked()
 }
 
 // contextState is the mutable test context state shared by test helpers.
@@ -272,8 +325,12 @@ type contextState struct {
 	// instead of a panic.
 	current context.Context
 	// cancels tracks every context created for this test so cleanup can release them all.
-	cancels    []context.CancelFunc
-	decorators []contextDecorator
+	cancels                 []context.CancelFunc
+	decorators              []contextDecorator
+	extensionGrants         []extensionGrant
+	extensionDenied         int
+	extensionLimit          string
+	extensionRequestedTotal time.Duration
 }
 
 func newContextState(tb testing.TB, timeout time.Duration, explicitTimeout bool) *contextState {
@@ -283,7 +340,12 @@ func newContextState(tb testing.TB, timeout time.Duration, explicitTimeout bool)
 		timeout:         timeout,
 		explicitTimeout: explicitTimeout,
 	}
-	st.push(newTestContext(tb, st, st.createdAt.Add(timeout)))
+	deadline := st.createdAt.Add(timeout)
+	if goTestDeadline, ok := GoTestDeadline(tb); ok && goTestDeadline.Before(deadline) {
+		deadline = goTestDeadline
+		st.extensionLimit = extensionLimitGoTestTimeout
+	}
+	st.push(newTestContext(tb, st, deadline))
 	return st
 }
 
@@ -305,8 +367,8 @@ func getOrCreateContextState(tb testing.TB, cfg config) *contextState {
 			delete(testContexts.byTest, tb)
 			testContexts.Unlock()
 
-			if timedOut, timeout := st.cleanup(); timedOut {
-				tb.Errorf("test exceeded timeout of %v", timeout)
+			if err := st.cleanup(); err != nil {
+				tb.Errorf("%v", err)
 			}
 		})
 	}
@@ -337,16 +399,14 @@ func (s *contextState) push(ctx context.Context, cancel context.CancelFunc) {
 }
 
 // cleanup cancels every context created for the test and reports whether the
-// test's context deadline had already fired, and how long after createdAt that was.
-func (s *contextState) cleanup() (timedOut bool, timeout time.Duration) {
+// test's context deadline had already fired.
+func (s *contextState) cleanup() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	timedOut = s.current.Err() == context.DeadlineExceeded
-	timeout = s.timeout
-
-	if deadline, ok := s.current.Deadline(); ok {
-		timeout = deadline.Sub(s.createdAt)
+	var timeoutErr error
+	if err := s.current.Err(); errors.Is(err, context.DeadlineExceeded) {
+		timeoutErr = fmt.Errorf("%w: %s", err, s.timeoutExceededMessageLocked())
 	}
 
 	for _, cancel := range slices.Backward(s.cancels) {
@@ -357,7 +417,73 @@ func (s *contextState) cleanup() (timedOut bool, timeout time.Duration) {
 	// must get a context, not a panic. Clearing cancels makes cleanup idempotent.
 	s.cancels = nil
 	s.decorators = nil
-	return timedOut, timeout
+	return timeoutErr
+}
+
+func (s *contextState) timeoutExceededMessageLocked() string {
+	currentTimeout := s.timeout
+	if deadline, ok := s.current.Deadline(); ok {
+		currentTimeout = deadline.Sub(s.createdAt)
+	}
+
+	message := fmt.Sprintf("test exceeded timeout of %v", reportDuration(s.timeout))
+	if s.extensionLimit == extensionLimitGoTestTimeout {
+		message = fmt.Sprintf("test exceeded go test timeout before test context timeout of %v", reportDuration(s.timeout))
+	} else if currentTimeout > s.timeout && s.extensionLimit == extensionLimitTestContextCap {
+		message = fmt.Sprintf(
+			"test exceeded test context extension cap of %v (originally %v, extensions requested total %v)",
+			reportDuration(s.maxDeadline().Sub(s.createdAt)),
+			reportDuration(s.timeout),
+			reportDuration(s.extensionRequestedTotal),
+		)
+	} else if currentTimeout > s.timeout {
+		message = fmt.Sprintf("test exceeded extended timeout of %v (originally %v)", reportDuration(currentTimeout), reportDuration(s.timeout))
+	}
+	if audit := s.extensionAuditLocked(); audit != "" {
+		message += "\n" + audit
+	}
+	return message
+}
+
+func (s *contextState) extensionAuditLocked() string {
+	if len(s.extensionGrants) == 0 && s.extensionDenied == 0 {
+		return ""
+	}
+
+	var total time.Duration
+	for _, grant := range s.extensionGrants {
+		total += grant.duration
+	}
+	message := fmt.Sprintf("ctx extensions   = %d (+%v total", len(s.extensionGrants), reportDuration(total))
+	if s.extensionLimit != "" {
+		message += "; limited by " + s.extensionLimit
+	}
+	message += ")"
+	for i, grant := range s.extensionGrants {
+		message += fmt.Sprintf("\n  %d. +%v after %v", i+1, reportDuration(grant.duration), reportDuration(grant.elapsed))
+	}
+	if s.extensionDenied > 0 {
+		message += fmt.Sprintf("\n%s", contextExtensionDeniedMessage(s.extensionDenied))
+	}
+	return message
+}
+
+func contextExtensionDeniedMessage(count int) string {
+	if count == 1 {
+		return "1 context extension denied"
+	}
+	return fmt.Sprintf("%d context extensions denied", count)
+}
+
+func reportDuration(d time.Duration) string {
+	if d > -time.Millisecond && d < time.Millisecond {
+		rounded := d.Round(time.Microsecond)
+		if rounded == 0 {
+			return "0µs"
+		}
+		return rounded.String()
+	}
+	return d.Round(time.Millisecond).String()
 }
 
 // effectiveTimeout resolves the timeout to use and reports whether it was
