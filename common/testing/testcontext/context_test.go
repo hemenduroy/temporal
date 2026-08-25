@@ -156,7 +156,7 @@ func TestCleanup(t *testing.T) {
 				<-ctx.Done() // let the deadline pass
 			})
 
-			require.Equal(t, fmt.Sprintf("context deadline exceeded: test exceeded timeout of %v", timeout), tb.error())
+			require.Equal(t, fmt.Sprintf("test exceeded timeout of %v", timeout), tb.error())
 		})
 	})
 
@@ -172,9 +172,9 @@ func TestCleanup(t *testing.T) {
 			})
 
 			require.Equal(t, strings.Join([]string{
-				"context deadline exceeded: test exceeded extended timeout of 1m40s (originally 1m30s)",
+				"test exceeded extended timeout of 1m40s (originally 1m30s)",
 				"ctx extensions   = 1 (+10s total)",
-				"  1. +10s after 0µs",
+				"  1. +10s after 0s",
 			}, "\n"), tb.error())
 		})
 	})
@@ -191,9 +191,9 @@ func TestCleanup(t *testing.T) {
 			})
 
 			require.Equal(t, strings.Join([]string{
-				"context deadline exceeded: test exceeded test context extension cap of 2m0s (originally 1m30s, extensions requested total 8m30s)",
+				"test exceeded test context extension cap of 2m0s (originally 1m30s, extensions requested total 8m30s)",
 				"ctx extensions   = 1 (+30s total; limited by test context extension cap)",
-				"  1. +30s after 0µs",
+				"  1. +30s after 0s",
 			}, "\n"), tb.error())
 		})
 	})
@@ -209,7 +209,7 @@ func TestCleanup(t *testing.T) {
 				<-ctx.Done()
 			})
 
-			require.Equal(t, "context deadline exceeded: test exceeded go test timeout before test context timeout of 10s", tb.error())
+			require.Equal(t, "test exceeded go test timeout before test context timeout of 10s", tb.error())
 		})
 	})
 }
@@ -312,6 +312,10 @@ func TestEnsureRemaining(t *testing.T) {
 			require.True(t, ok)
 			require.Equal(t, start.Add(100*time.Millisecond), refreshedDeadline)
 			require.Same(t, ctx, refreshed, "context should not have been replaced")
+			require.Equal(t, strings.Join([]string{
+				"ctx extensions   = 0 (+0s total; limited by explicit test timeout)",
+				"1 context extension denied",
+			}, "\n"), ExtensionAudit(ctx))
 		})
 	})
 
@@ -516,12 +520,38 @@ func TestExtensionAudit(t *testing.T) {
 
 		require.Equal(t, strings.Join([]string{
 			"ctx extensions   = 3 (+30s total; limited by test context extension cap)",
-			"  1. +10s after 0µs",
+			"  1. +10s after 0s",
 			"  2. +15s after 5s",
 			"  3. +5s after 5s",
 			"1 context extension denied",
 		}, "\n"), ExtensionAudit(ctx))
 	})
+}
+
+func TestExtensionAuditTruncatesGrants(t *testing.T) {
+	t.Parallel()
+
+	st := contextState{
+		extensionGrants: []extensionGrant{
+			{duration: time.Second, elapsed: 0},
+			{duration: 2 * time.Second, elapsed: time.Second},
+			{duration: 3 * time.Second, elapsed: 2 * time.Second},
+			{duration: 4 * time.Second, elapsed: 3 * time.Second},
+			{duration: 5 * time.Second, elapsed: 4 * time.Second},
+			{duration: 6 * time.Second, elapsed: 5 * time.Second},
+		},
+		extensionDenied: 2,
+	}
+
+	require.Equal(t, strings.Join([]string{
+		"ctx extensions   = 6 (+21s total)",
+		"  1. +1s after 0s",
+		"  ... 2 extensions omitted ...",
+		"  4. +4s after 3s",
+		"  5. +5s after 4s",
+		"  6. +6s after 5s",
+		"2 context extensions denied",
+	}, "\n"), st.extensionAuditLocked())
 }
 
 // recordingTB records failures instead of failing a real test.

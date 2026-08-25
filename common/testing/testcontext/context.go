@@ -30,8 +30,13 @@ const (
 	testNameMetadataKey = "temporal-test-name"
 	testTimeoutEnvVar   = "TEMPORAL_TEST_TIMEOUT"
 
-	extensionLimitTestContextCap = "test context extension cap"
-	extensionLimitGoTestTimeout  = "go test timeout"
+	extensionLimitTestContextCap  = "test context extension cap"
+	extensionLimitGoTestTimeout   = "go test timeout"
+	extensionLimitExplicitTimeout = "explicit test timeout"
+
+	// Keep extension audit output useful even when many helpers request extensions.
+	reportHeadExtensions = 1
+	reportTailExtensions = 3
 )
 
 // contextStore tracks one context state per test.
@@ -259,7 +264,11 @@ func EnsureRemaining(ctx context.Context, tb testing.TB, minRemaining time.Durat
 	limit := ""
 	if maxDeadline := st.maxDeadline(); maxDeadline.Before(requestedDeadline) {
 		requestedDeadline = maxDeadline
-		limit = extensionLimitTestContextCap
+		if st.explicitTimeout {
+			limit = extensionLimitExplicitTimeout
+		} else {
+			limit = extensionLimitTestContextCap
+		}
 	}
 	if goTestDeadline, ok := GoTestDeadline(st.owner); ok && goTestDeadline.Before(requestedDeadline) {
 		requestedDeadline = goTestDeadline
@@ -280,9 +289,7 @@ func EnsureRemaining(ctx context.Context, tb testing.TB, minRemaining time.Durat
 		st.push(newTestContext(st.owner, st, requestedDeadline))
 	} else {
 		st.extensionDenied++
-		if limit != "" {
-			st.extensionLimit = limit
-		}
+		st.extensionLimit = limit
 	}
 
 	if bare {
@@ -368,8 +375,8 @@ func getOrCreateContextState(tb testing.TB, cfg config) *contextState {
 			delete(testContexts.byTest, tb)
 			testContexts.Unlock()
 
-			if err := st.cleanup(); err != nil {
-				tb.Errorf("%v", err)
+			if message := st.cleanup(); message != "" {
+				tb.Errorf("%s", message)
 			}
 		})
 	}
@@ -399,15 +406,15 @@ func (s *contextState) push(ctx context.Context, cancel context.CancelFunc) {
 	s.cancels = append(s.cancels, cancel)
 }
 
-// cleanup cancels every context created for the test and reports whether the
-// test's context deadline had already fired.
-func (s *contextState) cleanup() error {
+// cleanup cancels every context created for the test and returns a failure
+// message if the test's context deadline had already fired.
+func (s *contextState) cleanup() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var timeoutErr error
+	var timeoutMessage string
 	if err := s.current.Err(); errors.Is(err, context.DeadlineExceeded) {
-		timeoutErr = fmt.Errorf("%w: %s", err, s.timeoutExceededMessageLocked())
+		timeoutMessage = s.timeoutExceededMessageLocked()
 	}
 
 	for _, cancel := range slices.Backward(s.cancels) {
@@ -418,7 +425,7 @@ func (s *contextState) cleanup() error {
 	// must get a context, not a panic. Clearing cancels makes cleanup idempotent.
 	s.cancels = nil
 	s.decorators = nil
-	return timeoutErr
+	return timeoutMessage
 }
 
 func (s *contextState) timeoutExceededMessageLocked() string {
@@ -456,34 +463,43 @@ func (s *contextState) extensionAuditLocked() string {
 		total += grant.duration
 	}
 	var message strings.Builder
-	message.WriteString(fmt.Sprintf("ctx extensions   = %d (+%v total", len(s.extensionGrants), reportDuration(total)))
+	fmt.Fprintf(&message, "ctx extensions   = %d (+%v total", len(s.extensionGrants), reportDuration(total))
 	if s.extensionLimit != "" {
 		message.WriteString("; limited by " + s.extensionLimit)
 	}
 	message.WriteString(")")
-	for i, grant := range s.extensionGrants {
-		message.WriteString(fmt.Sprintf("\n  %d. +%v after %v", i+1, reportDuration(grant.duration), reportDuration(grant.elapsed)))
+	writeGrant := func(i int, grant extensionGrant) {
+		fmt.Fprintf(&message, "\n  %d. +%v after %v", i+1, reportDuration(grant.duration), reportDuration(grant.elapsed))
 	}
-	if s.extensionDenied > 0 {
-		message.WriteString(fmt.Sprintf("\n%s", contextExtensionDeniedMessage(s.extensionDenied)))
+	if len(s.extensionGrants) <= reportHeadExtensions+reportTailExtensions {
+		for i, grant := range s.extensionGrants {
+			writeGrant(i, grant)
+		}
+	} else {
+		for i, grant := range s.extensionGrants[:reportHeadExtensions] {
+			writeGrant(i, grant)
+		}
+		omitted := len(s.extensionGrants) - reportHeadExtensions - reportTailExtensions
+		fmt.Fprintf(&message, "\n  ... %d extensions omitted ...", omitted)
+		for i, grant := range s.extensionGrants[len(s.extensionGrants)-reportTailExtensions:] {
+			writeGrant(len(s.extensionGrants)-reportTailExtensions+i, grant)
+		}
+	}
+	if s.extensionDenied == 1 {
+		message.WriteString("\n1 context extension denied")
+	} else if s.extensionDenied > 1 {
+		fmt.Fprintf(&message, "\n%d context extensions denied", s.extensionDenied)
 	}
 	return message.String()
 }
 
-func contextExtensionDeniedMessage(count int) string {
-	if count == 1 {
-		return "1 context extension denied"
-	}
-	return fmt.Sprintf("%d context extensions denied", count)
-}
-
+// Keep this formatting consistent with await timeout reports, which embed this text.
 func reportDuration(d time.Duration) string {
 	if d > -time.Millisecond && d < time.Millisecond {
 		rounded := d.Round(time.Microsecond)
-		if rounded == 0 {
-			return "0µs"
+		if rounded != 0 {
+			return rounded.String()
 		}
-		return rounded.String()
 	}
 	return d.Round(time.Millisecond).String()
 }
