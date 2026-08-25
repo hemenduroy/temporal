@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -454,18 +455,19 @@ func (s *contextState) extensionAuditLocked() string {
 	for _, grant := range s.extensionGrants {
 		total += grant.duration
 	}
-	message := fmt.Sprintf("ctx extensions   = %d (+%v total", len(s.extensionGrants), reportDuration(total))
+	var message strings.Builder
+	message.WriteString(fmt.Sprintf("ctx extensions   = %d (+%v total", len(s.extensionGrants), reportDuration(total)))
 	if s.extensionLimit != "" {
-		message += "; limited by " + s.extensionLimit
+		message.WriteString("; limited by " + s.extensionLimit)
 	}
-	message += ")"
+	message.WriteString(")")
 	for i, grant := range s.extensionGrants {
-		message += fmt.Sprintf("\n  %d. +%v after %v", i+1, reportDuration(grant.duration), reportDuration(grant.elapsed))
+		message.WriteString(fmt.Sprintf("\n  %d. +%v after %v", i+1, reportDuration(grant.duration), reportDuration(grant.elapsed)))
 	}
 	if s.extensionDenied > 0 {
-		message += fmt.Sprintf("\n%s", contextExtensionDeniedMessage(s.extensionDenied))
+		message.WriteString(fmt.Sprintf("\n%s", contextExtensionDeniedMessage(s.extensionDenied)))
 	}
-	return message
+	return message.String()
 }
 
 func contextExtensionDeniedMessage(count int) string {
