@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"text/tabwriter"
 	"time"
 )
 
@@ -64,31 +63,20 @@ func (r timeoutReport) reportTimeout(tb testing.TB, funcName, timeoutMsg string)
 		message = fmt.Sprintf("%s (not satisfied after %v)", timeoutMsg, reportDuration(r.effectiveTimeout))
 	}
 	var details strings.Builder
-	detailWriter := tabwriter.NewWriter(&details, 0, 0, 1, ' ', 0)
-	var detailErr error
+	// Keep the 16-character label column aligned with the testcontext audit appended below.
 	writeDetail := func(label, value string) {
-		if detailErr != nil {
-			return
-		}
-		_, detailErr = fmt.Fprintf(detailWriter, "  %s\t= %s\n", label, value)
+		fmt.Fprintf(&details, "  %-16s = %s\n", label, value)
 	}
 
-	hasAttemptFailures := len(r.failures) > 0 || r.attemptTimeouts > 0
-	shortenedTimeout := r.configuredTimeout-r.effectiveTimeout > time.Millisecond
-	if r.configuredTimeout > 0 && (!hasAttemptFailures || shortenedTimeout) {
-		value := reportDuration(r.effectiveTimeout)
-		if shortenedTimeout {
-			value += fmt.Sprintf(" (configured %v", reportDuration(r.configuredTimeout))
-			if r.deadlineCause != "" {
-				value += "; limited by " + r.deadlineCause
-			}
-			value += ")"
-		}
-		writeDetail("await timeout", value)
+	if r.deadlineCause != "" && r.configuredTimeout > 0 {
+		writeDetail("await timeout", fmt.Sprintf(
+			"%v (configured %v; limited by %s)",
+			reportDuration(r.effectiveTimeout), reportDuration(r.configuredTimeout), r.deadlineCause,
+		))
 	}
 	writeDetail("attempts", fmt.Sprintf("%d", r.attempts))
 	if r.attemptTimeouts > 0 {
-		writeDetail("attempt timeout", fmt.Sprintf("%d (configured as %v)", r.attemptTimeouts, reportDuration(r.attemptTimeout)))
+		writeDetail("attempt timeouts", fmt.Sprintf("%d (attempt timeout %v)", r.attemptTimeouts, reportDuration(r.attemptTimeout)))
 	}
 	if r.attempts > 0 {
 		writeDetail(
@@ -100,32 +88,20 @@ func (r timeoutReport) reportTimeout(tb testing.TB, funcName, timeoutMsg string)
 			),
 		)
 	}
-	if r.attemptTimeouts == 0 && r.deadlineCause != "" {
-		writeDetail("last failure", r.deadlineCause)
-	}
 	if r.testContextAudit != "" {
-		if detailErr == nil {
-			_, detailErr = fmt.Fprintln(detailWriter, indentDetail(r.testContextAudit))
-		}
-	}
-	if detailErr != nil {
-		tb.Fatalf("%s: failed to render timeout report: %v", funcName, detailErr)
-		return
-	}
-	if err := detailWriter.Flush(); err != nil {
-		tb.Fatalf("%s: failed to render timeout report: %v", funcName, err)
-		return
+		details.WriteString(indentDetail(r.testContextAudit))
+		details.WriteByte('\n')
 	}
 	tb.Fatalf("%s: %s\ndetails:\n%s", funcName, message, strings.TrimSuffix(details.String(), "\n"))
 }
 
+// Keep this formatting consistent with testcontext reports embedded above.
 func reportDuration(d time.Duration) string {
 	if d > -time.Millisecond && d < time.Millisecond {
 		rounded := d.Round(time.Microsecond)
-		if rounded == 0 {
-			return "0µs"
+		if rounded != 0 {
+			return rounded.String()
 		}
-		return rounded.String()
 	}
 	return d.Round(time.Millisecond).String()
 }

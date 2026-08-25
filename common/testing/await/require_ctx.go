@@ -120,6 +120,11 @@ func run(
 			failContextCanceled(tb, report, funcName, err)
 			return
 		}
+		// Sleep can return at the deadline; do not start another attempt then.
+		if deadlineReached(deadline) {
+			report.reportTimeout(tb, funcName, cfg.timeoutMsg)
+			return
+		}
 
 		report.nextPoll()
 
@@ -188,7 +193,7 @@ func run(
 func failContextCanceled(tb testing.TB, report timeoutReport, funcName string, err error) {
 	tb.Helper()
 	report.reportAttemptErrors(tb)
-	tb.Fatalf("%v", fmt.Errorf("%s: context canceled before condition was satisfied: %w", funcName, err))
+	tb.Fatalf("%s: context canceled before condition was satisfied: %v", funcName, err)
 }
 
 // attemptResult describes how an attempt terminated. Exactly one of the

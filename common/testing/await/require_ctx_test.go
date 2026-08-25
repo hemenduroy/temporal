@@ -173,24 +173,24 @@ func TestRequire_FailureScenarios(t *testing.T) {
 			require.Equal(t, strings.Join([]string{
 				"Require: condition not satisfied after 1s",
 				"details:",
-				"  attempts         = 11",
-				"  attempt duration = avg 0µs, max 0µs",
+				"  attempts         = 10",
+				"  attempt duration = avg 0s, max 0s",
 			}, "\n"), tb.fatals())
 			require.Equal(t, strings.Join([]string{
 				"attempt errors:",
 				"",
 				"  --- attempt 1 ---",
 				"    attempt 1 failed",
-				"  ... 7 attempts omitted ...",
+				"  ... 6 attempts omitted ...",
+				"",
+				"  --- attempt 8 ---",
+				"    attempt 8 failed",
 				"",
 				"  --- attempt 9 ---",
 				"    attempt 9 failed",
 				"",
 				"  --- attempt 10 ---",
 				"    attempt 10 failed",
-				"",
-				"  --- attempt 11 ---",
-				"    attempt 11 failed",
 			}, "\n"), tb.errors())
 		})
 	})
@@ -215,7 +215,6 @@ func TestRequire_FailureScenarios(t *testing.T) {
 			require.Equal(t, strings.Join([]string{
 				"Require: condition not satisfied after 2s",
 				"details:",
-				"  await timeout    = 2s",
 				"  attempts         = 1",
 				"  attempt duration = avg 2s, max 2s",
 			}, "\n"), tb.fatals())
@@ -248,12 +247,12 @@ func TestRequire_FailureScenarios(t *testing.T) {
 			require.Equal(t, strings.Join([]string{
 				"Require: condition not satisfied after 250ms",
 				"details:",
-				"  attempts         = 3",
-				"  attempt timeout  = 2 (configured as 50ms)",
-				"  attempt duration = avg 33ms, max 50ms",
+				"  attempts         = 2",
+				"  attempt timeouts = 2 (attempt timeout 50ms)",
+				"  attempt duration = avg 50ms, max 50ms",
 			}, "\n"), tb.fatals())
 			require.Equal(t, attemptTimeout, firstAttemptRemaining)
-			require.Equal(t, int32(3), attempts.Load())
+			require.Equal(t, int32(2), attempts.Load())
 		})
 	})
 
@@ -276,7 +275,6 @@ func TestRequire_FailureScenarios(t *testing.T) {
 			require.Equal(t, strings.Join([]string{
 				"Require: condition not satisfied after 1s",
 				"details:",
-				"  await timeout    = 1s",
 				"  attempts         = 1",
 				"  attempt duration = avg 1s, max 1s",
 			}, "\n"), tb.fatals())
@@ -315,7 +313,6 @@ func TestRequire_FailureScenarios(t *testing.T) {
 				"  await timeout    = 1s (configured 2s; limited by parent context deadline)",
 				"  attempts         = 1",
 				"  attempt duration = avg 1s, max 1s",
-				"  last failure     = parent context deadline",
 			}, "\n"), tb.fatals())
 		})
 	})
@@ -340,10 +337,10 @@ func TestRequire_FailureScenarios(t *testing.T) {
 				"details:",
 				"  await timeout    = 2m0s (configured 3m0s; limited by parent context deadline)",
 				"  attempts         = 11",
-				"  attempt timeout  = 10 (configured as 10s)",
+				"  attempt timeouts = 10 (attempt timeout 10s)",
 				"  attempt duration = avg 10s, max 10s",
 				"  ctx extensions   = 1 (+30s total; limited by test context extension cap)",
-				"    1. +30s after 0µs",
+				"    1. +30s after 0s",
 			}, "\n"), tb.fatals())
 		})
 	})
@@ -387,8 +384,8 @@ func TestRequire_FailureScenarios(t *testing.T) {
 			require.Equal(t, strings.Join([]string{
 				"Requiref: workflow wf-123 not ready (not satisfied after 1s)",
 				"details:",
-				"  attempts         = 11",
-				"  attempt duration = avg 0µs, max 0µs",
+				"  attempts         = 10",
+				"  attempt duration = avg 0s, max 0s",
 			}, "\n"), tb.fatals())
 		})
 	})
@@ -530,7 +527,6 @@ func TestRequire_WaitsForInFlightAttemptOnTimeout(t *testing.T) {
 		require.Equal(t, strings.Join([]string{
 			"Require: condition not satisfied after 1s",
 			"details:",
-			"  await timeout    = 1s",
 			"  attempts         = 1",
 			"  attempt duration = avg 1s, max 1s",
 		}, "\n"), tb.fatals())
