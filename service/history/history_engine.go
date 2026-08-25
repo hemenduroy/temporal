@@ -286,6 +286,7 @@ func NewEngineWithShardContext(
 			persistenceRateLimiter,
 			logger,
 			shard.GetEventLogger(),
+			testHooks,
 		)
 		historyEngImpl.nDCHSMStateReplicator = ndc.NewHSMStateReplicator(
 			shard,
