@@ -5504,7 +5504,7 @@ func (wh *WorkflowHandler) prepareUpdateWorkflowRequest(
 
 	if cbs := request.GetRequest().GetCompletionCallbacks(); len(cbs) > 0 {
 		opts := callbacks.ValidatorOptions{
-			EnabledKinds: wh.config.WorkflowUpdateEnabledCallbackKinds(namespaceName.String()),
+			EnabledKinds: wh.config.WorkflowEnabledCallbackKinds(namespaceName.String()),
 		}
 		if err := wh.callbackValidator.Validate(ctx, namespaceName.String(), cbs, opts); err != nil {
 			return err
