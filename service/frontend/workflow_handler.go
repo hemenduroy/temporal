@@ -5203,6 +5203,7 @@ func (wh *WorkflowHandler) prepareSchedulerQuery(
 			chasmMapper,
 			wh.config.VisibilityEnableUnifiedQueryConverter,
 			query,
+			wh.logger,
 		); err != nil {
 			return "", err
 		}

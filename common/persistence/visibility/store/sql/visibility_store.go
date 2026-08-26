@@ -275,6 +275,7 @@ func (s *VisibilityStore) countChasmExecutions(
 		saMapper,
 		mapper,
 		request.ArchetypeId,
+		s.logger,
 	)
 	if err != nil {
 		var converterErr *query.ConverterError
@@ -387,12 +388,12 @@ func (s *VisibilityStore) listExecutionsInternal(
 		saMapper,
 		request.ChasmMapper,
 		request.ArchetypeID,
+		s.logger,
 	)
 	if err != nil {
 		// Convert ConverterError to InvalidArgument and pass through all other errors (which should be
 		// only mapper errors).
-		var converterErr *query.ConverterError
-		if errors.As(err, &converterErr) {
+		if converterErr, ok := errors.AsType[*query.ConverterError](err); ok {
 			return nil, converterErr.ToInvalidArgument()
 		}
 		return nil, err
@@ -622,6 +623,7 @@ func (s *VisibilityStore) countWorkflowExecutions(
 		saMapper,
 		nil,
 		chasm.UnspecifiedArchetypeID,
+		s.logger,
 	)
 	if err != nil {
 		// Convert ConverterError to InvalidArgument and pass through all other errors (which should be
@@ -935,8 +937,9 @@ func buildQueryParams(
 	saMapper searchattribute.Mapper,
 	chasmMapper *chasm.VisibilitySearchAttributesMapper,
 	archetypeID chasm.ArchetypeID,
+	logger log.Logger,
 ) (*query.QueryParams[sqlparser.Expr], error) {
-	c := query.NewQueryConverter(sqlQC, namespaceName, saTypeMap, saMapper).
+	c := query.NewQueryConverter(sqlQC, namespaceName, saTypeMap, saMapper, logger).
 		WithChasmMapper(chasmMapper).
 		WithArchetypeID(archetypeID)
 
